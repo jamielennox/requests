@@ -426,39 +426,13 @@ class Session(SessionRedirectMixin):
         )
         prep = self.prepare_request(req)
 
-        proxies = proxies or {}
-
-        # Gather clues from the surrounding environment.
-        if self.trust_env:
-            # Set environment's proxies.
-            env_proxies = get_environ_proxies(url) or {}
-            for (k, v) in env_proxies.items():
-                proxies.setdefault(k, v)
-
-            # Look for configuration.
-            if verify is True or verify is None:
-                verify = os.environ.get('REQUESTS_CA_BUNDLE')
-
-            # Curl compatibility.
-            if verify is True or verify is None:
-                verify = os.environ.get('CURL_CA_BUNDLE')
-
-        # Merge all the kwargs.
-        proxies = merge_setting(proxies, self.proxies)
-        stream = merge_setting(stream, self.stream)
-        verify = merge_setting(verify, self.verify)
-        cert = merge_setting(cert, self.cert)
-
-        # Send the request.
-        send_kwargs = {
-            'stream': stream,
-            'timeout': timeout,
-            'verify': verify,
-            'cert': cert,
-            'proxies': proxies,
-            'allow_redirects': allow_redirects,
-        }
-        resp = self.send(prep, **send_kwargs)
+        resp = self.send(prep,
+            stream=stream,
+            timeout=timeout,
+            verify=verify,
+            cert=cert,
+            proxies=proxies,
+            allow_redirects=allow_redirects)
 
         return resp
 
@@ -533,29 +507,44 @@ class Session(SessionRedirectMixin):
 
     def send(self, request, **kwargs):
         """Send a given PreparedRequest."""
-        # Set defaults that the hooks can utilize to ensure they always have
-        # the correct parameters to reproduce the previous request.
-        kwargs.setdefault('stream', self.stream)
-        kwargs.setdefault('verify', self.verify)
-        kwargs.setdefault('cert', self.cert)
-        kwargs.setdefault('proxies', self.proxies)
-
         # It's possible that users might accidentally send a Request object.
         # Guard against that specific failure case.
         if not isinstance(request, PreparedRequest):
             raise ValueError('You can only send PreparedRequests.')
 
+        # Set defaults that the hooks can utilize to ensure they always have
+        # the correct parameters to reproduce the previous request.
+        stream = kwargs.setdefault('stream', self.stream)
+        verify = kwargs.setdefault('verify', self.verify)
+        cert = kwargs.setdefault('cert', self.cert)
+        proxies = kwargs.get('proxies') or {}
+        timeout = kwargs.get('timeout')
+        allow_redirects = kwargs.pop('allow_redirects', True)
+
+        # Gather clues from the surrounding environment.
+        if self.trust_env:
+            # Set environment's proxies.
+            env_proxies = get_environ_proxies(request.url) or {}
+            for (k, v) in env_proxies.items():
+                proxies.setdefault(k, v)
+
+            # Look for configuration.
+            if verify is True or verify is None:
+                verify = os.environ.get('REQUESTS_CA_BUNDLE')
+
+            # Curl compatibility.
+            if verify is True or verify is None:
+                verify = os.environ.get('CURL_CA_BUNDLE')
+
+            # Update kwargs for hooks
+            kwargs['verify'] = verify
+
+        # update proxies in kwargs so hooks get the full combined proxy list
+        proxies = merge_setting(proxies, self.proxies)
+        kwargs['proxies'] = proxies
+
         while request.url in self.redirect_cache:
             request.url = self.redirect_cache.get(request.url)
-
-        # Set up variables needed for resolve_redirects and dispatching of hooks
-        allow_redirects = kwargs.pop('allow_redirects', True)
-        stream = kwargs.get('stream')
-        timeout = kwargs.get('timeout')
-        verify = kwargs.get('verify')
-        cert = kwargs.get('cert')
-        proxies = kwargs.get('proxies')
-        hooks = request.hooks
 
         # Get the appropriate adapter to use
         adapter = self.get_adapter(url=request.url)
@@ -570,7 +559,7 @@ class Session(SessionRedirectMixin):
         r.elapsed = datetime.utcnow() - start
 
         # Response manipulation hooks
-        r = dispatch_hook('response', hooks, r, **kwargs)
+        r = dispatch_hook('response', request.hooks, r, **kwargs)
 
         # Persist cookies
         if r.history:
